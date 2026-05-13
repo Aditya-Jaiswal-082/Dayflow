@@ -784,7 +784,7 @@ export default function App() {
             <select value={newSpecial.cat} onChange={e=>setNewSpecial(p=>({...p,cat:e.target.value}))}>
               {["Special","Priority","Urgent","Other"].map(c=><option key={c}>{c}</option>)}
             </select>
-            <button className="btn" style={{background:"#ef4444"}} onClick={addSpecial}>Add Special Task</button>
+            <button className="btn" style={{background:"#ef4440"}} onClick={addSpecial}>Add Special Task</button>
           </div>
         </Modal>
 
