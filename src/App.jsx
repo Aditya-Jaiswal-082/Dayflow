@@ -1,8 +1,26 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
 } from "recharts";
+
+/* ── localStorage-backed state hook ───────────────────────────────────────── */
+function useLS(key, init) {
+  const [val, setVal] = useState(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored ? JSON.parse(stored) : init;
+    } catch {
+      return init;
+    }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+  }, [key, val]);
+
+  return [val, setVal];
+}
 
 /* ── constants ─────────────────────────────────────────────────────────────── */
 const DAYS   = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
@@ -229,15 +247,16 @@ const INIT_NOTES = [
 
 /* ── APP ───────────────────────────────────────────────────────────────────── */
 export default function App() {
-  const [dark,    setDark]    = useState(false);
+  /* persisted state — survives refresh via localStorage */
+  const [dark,     setDark]     = useLS("df_dark",     false);
+  const [tasks,    setTasks]    = useLS("df_tasks",    INIT_TASKS);
+  const [dayData,  setDayData]  = useLS("df_daydata",  INIT_DAY);
+  const [expenses, setExpenses] = useLS("df_expenses", INIT_EXP);
+  const [notes,    setNotes]    = useLS("df_notes",    INIT_NOTES);
+
+  /* session-only state — fine to reset on refresh */
   const [tab,     setTab]     = useState("today");
   const [viewKey, setViewKey] = useState(TK);
-
-  /* data */
-  const [tasks,    setTasks]    = useState(INIT_TASKS);
-  const [dayData,  setDayData]  = useState(INIT_DAY);
-  const [expenses, setExpenses] = useState(INIT_EXP);
-  const [notes,    setNotes]    = useState(INIT_NOTES);
 
   /* sheets */
   const [sheet, setSheet] = useState(null);
