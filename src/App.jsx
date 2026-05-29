@@ -21,8 +21,10 @@ function migrate(raw) {
   return raw;
 }
 
+// FIX: Guard against localStorage being unavailable (SSR / Vercel build environments)
 function loadStore(defaults) {
   try {
+    if (typeof window === "undefined") return { ...defaults, version: DATA_VERSION };
     const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
     const m   = migrate(raw);
     if (!m) return { ...defaults, version:DATA_VERSION };
@@ -33,7 +35,10 @@ function loadStore(defaults) {
 }
 
 function saveStore(d) {
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(d)); } catch {}
+  try {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(STORE_KEY, JSON.stringify(d));
+  } catch {}
 }
 
 /* ─── constants ────────────────────────────────────────────────────────────── */
@@ -189,11 +194,9 @@ function NoteCard({n,onEdit,onPin,textColor,mutedColor}) {
 }
 
 /* ─── Fixed drag-to-reorder hook ───────────────────────────────────────────── */
-/* Uses refs for all mutable state read inside event listeners to avoid stale closures */
 function useDragList(items, setItems) {
   const [dragState, setDragState] = useState({ dragging:null, overIndex:null, active:false });
 
-  /* live refs — always current inside event handlers */
   const stateRef  = useRef(dragState);
   const itemsRef  = useRef(items);
   const itemRefs  = useRef([]);
@@ -201,8 +204,6 @@ function useDragList(items, setItems) {
 
   useEffect(() => { stateRef.current  = dragState; }, [dragState]);
   useEffect(() => { itemsRef.current  = items;     }, [items]);
-
-  /* clear stale refs when list length changes */
   useEffect(() => { itemRefs.current = itemRefs.current.slice(0, items.length); }, [items.length]);
 
   function getIdxFromY(y) {
@@ -253,7 +254,6 @@ function useDragList(items, setItems) {
   }, [dragState.active, handleMove, handleUp]);
 
   function onDown(e, index) {
-    /* Only fire from handle — guard against button/checkbox taps bubbling */
     if (e.target && e.target.closest && e.target.closest("button, [data-no-drag]")) return;
 
     const startY = e.touches ? e.touches[0].clientY : e.clientY;
@@ -310,7 +310,6 @@ function useDragList(items, setItems) {
 /* ─── APP ──────────────────────────────────────────────────────────────────── */
 export default function App() {
 
-  /* single versioned persisted store */
   const [store, setStoreRaw] = useState(() => loadStore(DEFAULTS));
   const setStore = useCallback((upd) => {
     setStoreRaw(prev => {
@@ -542,7 +541,7 @@ export default function App() {
     .drag-ghost{opacity:.38;transform:scale(.97)}
   `;
 
-  /* ── inner components (need closure access — defined before return) ─────── */
+  /* ── inner components ─────────────────────────────────────────────────────── */
 
   function DayNav() {
     const future = viewKey > tk;
@@ -612,7 +611,6 @@ export default function App() {
                 userSelect:"none",
               }}
             >
-              {/* drag handle only — onDown fires here, not on whole row */}
               <span
                 onTouchStart={e => { e.stopPropagation(); dragCtrl.onDown(e, i); }}
                 onMouseDown={e  => { e.stopPropagation(); dragCtrl.onDown(e, i); }}
@@ -859,7 +857,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* Bar chart — using Cell for per-bar color so gradient works reliably */}
               {expTrend.some(x=>x.amt>0)&&(
                 <div className="card" style={{marginBottom:12}}>
                   <Sec>Spending — 7 days</Sec>
