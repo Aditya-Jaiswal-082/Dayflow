@@ -21,10 +21,8 @@ function migrate(raw) {
   return raw;
 }
 
-// FIX: Guard against localStorage being unavailable (SSR / Vercel build environments)
 function loadStore(defaults) {
   try {
-    if (typeof window === "undefined") return { ...defaults, version: DATA_VERSION };
     const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
     const m   = migrate(raw);
     if (!m) return { ...defaults, version:DATA_VERSION };
@@ -35,10 +33,7 @@ function loadStore(defaults) {
 }
 
 function saveStore(d) {
-  try {
-    if (typeof window === "undefined") return;
-    localStorage.setItem(STORE_KEY, JSON.stringify(d));
-  } catch {}
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(d)); } catch {}
 }
 
 /* ─── constants ────────────────────────────────────────────────────────────── */
@@ -194,9 +189,11 @@ function NoteCard({n,onEdit,onPin,textColor,mutedColor}) {
 }
 
 /* ─── Fixed drag-to-reorder hook ───────────────────────────────────────────── */
+/* Uses refs for all mutable state read inside event listeners to avoid stale closures */
 function useDragList(items, setItems) {
   const [dragState, setDragState] = useState({ dragging:null, overIndex:null, active:false });
 
+  /* live refs — always current inside event handlers */
   const stateRef  = useRef(dragState);
   const itemsRef  = useRef(items);
   const itemRefs  = useRef([]);
@@ -204,6 +201,8 @@ function useDragList(items, setItems) {
 
   useEffect(() => { stateRef.current  = dragState; }, [dragState]);
   useEffect(() => { itemsRef.current  = items;     }, [items]);
+
+  /* clear stale refs when list length changes */
   useEffect(() => { itemRefs.current = itemRefs.current.slice(0, items.length); }, [items.length]);
 
   function getIdxFromY(y) {
@@ -254,6 +253,7 @@ function useDragList(items, setItems) {
   }, [dragState.active, handleMove, handleUp]);
 
   function onDown(e, index) {
+    /* Only fire from handle — guard against button/checkbox taps bubbling */
     if (e.target && e.target.closest && e.target.closest("button, [data-no-drag]")) return;
 
     const startY = e.touches ? e.touches[0].clientY : e.clientY;
@@ -307,9 +307,561 @@ function useDragList(items, setItems) {
   };
 }
 
+/* ─── WalletTab component ──────────────────────────────────────────────────── */
+function WalletTab({
+  expenses, sortedExp, monthExp, totalMonth, todayExp,
+  expByCat, splitExp, expGroups, days7, expTrend,
+  openAddExp, openEditExp, deleteExp,
+  dayAccent, card, glass, gBorder, tc, muted, border, inp, track, dark,
+}) {
+  const [walletView, setWalletView] = useState("overview"); // overview | weekly | monthly | analysis
+
+  const catOf    = id => EXP_CATS.find(c=>c.id===id)||{color:"#888",icon:"💳",label:"Other"};
+  const catColor = id => catOf(id).color;
+  const catIcon  = id => catOf(id).icon;
+  const catLabel = id => catOf(id).label;
+
+  function makeKey2(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+  function getWeekRange2(offsetWeeks) {
+    const now=new Date(), dow=now.getDay();
+    const start=new Date(now); start.setDate(now.getDate()-dow-offsetWeeks*7);
+    const end=new Date(start); end.setDate(start.getDate()+6);
+    return {start:makeKey2(start),end:makeKey2(end)};
+  }
+  function getMonthRange2(offsetMonths) {
+    const now=new Date(), y=now.getFullYear(), m=now.getMonth()-offsetMonths;
+    const start=new Date(y,m,1), end=new Date(y,m+1,0);
+    return {start:makeKey2(start),end:makeKey2(end),label:`${MONTHS[((m%12)+12)%12]} ${start.getFullYear()}`};
+  }
+  function sumR(s,e2) { return sortedExp.filter(e=>e.date>=s&&e.date<=e2).reduce((a,e)=>a+e.amount,0); }
+  function expsInR(s,e2) { return sortedExp.filter(e=>e.date>=s&&e.date<=e2); }
+  function catR(s,e2) {
+    return EXP_CATS.map(c=>({...c,total:sortedExp.filter(e=>e.date>=s&&e.date<=e2&&e.cat===c.id).reduce((a,e)=>a+e.amount,0)})).filter(x=>x.total>0).sort((a,b)=>b.total-a.total);
+  }
+
+  const thisWeekR  = getWeekRange2(0), lastWeekR  = getWeekRange2(1);
+  const thisMoR    = getMonthRange2(0), lastMoR   = getMonthRange2(1);
+  const mo2R       = getMonthRange2(2);
+
+  const twTotal    = sumR(thisWeekR.start,  thisWeekR.end);
+  const lwTotal    = sumR(lastWeekR.start,  lastWeekR.end);
+  const tmTotal    = sumR(thisMoR.start,    thisMoR.end);
+  const lmTotal    = sumR(lastMoR.start,    lastMoR.end);
+  const m2Total    = sumR(mo2R.start,       mo2R.end);
+  const wkChange   = lwTotal  ? Math.round(((twTotal-lwTotal)/lwTotal)*100)  : null;
+  const moChange   = lmTotal  ? Math.round(((tmTotal-lmTotal)/lmTotal)*100)  : null;
+
+  const last6Mo    = Array.from({length:6},(_,i)=>{
+    const r=getMonthRange2(5-i);
+    return {label:r.label.slice(0,3),total:sumR(r.start,r.end)};
+  });
+
+  const daysThisMo = new Date().getDate();
+  const daysLastMo = new Date(new Date().getFullYear(),new Date().getMonth(),0).getDate();
+  const avgThisMo  = daysThisMo ? Math.round(tmTotal/daysThisMo) : 0;
+  const avgLastMo  = daysLastMo ? Math.round(lmTotal/daysLastMo) : 0;
+
+  const topCat     = catR(thisMoR.start,thisMoR.end)[0]||null;
+  const twExps     = expsInR(thisWeekR.start,thisWeekR.end);
+  const lwExps     = expsInR(lastWeekR.start,lastWeekR.end);
+  const twCats     = catR(thisWeekR.start,thisWeekR.end);
+  const lwCats     = catR(lastWeekR.start,lastWeekR.end);
+  const lmCats     = catR(lastMoR.start,lastMoR.end);
+  const tmCats     = catR(thisMoR.start,thisMoR.end);
+
+  // week-by-week days for chart
+  const twDays = Array.from({length:7},(_,i)=>{
+    const dt=new Date(thisWeekR.start.split("-").map(Number).reduce((acc,v,i2)=>{
+      const d2=new Date(thisWeekR.start);d2.setDate(d2.getDate()+i);return d2;
+    }));
+    const d2=new Date(thisWeekR.start.split("-")[0],thisWeekR.start.split("-")[1]-1,+thisWeekR.start.split("-")[2]+i);
+    const k=makeKey2(d2);
+    const amt=sortedExp.filter(e=>e.date===k).reduce((a,e)=>a+e.amount,0);
+    return {label:DAYS[d2.getDay()].slice(0,3),amt,isToday:k===makeKey2(new Date())};
+  });
+
+  const pct=(v,total)=>total?Math.round((v/total)*100):0;
+
+  const tabStyle=(id)=>({
+    flex:1,padding:"7px 4px",borderRadius:10,fontSize:11,fontWeight:600,
+    background:walletView===id?dayAccent.grad:card,
+    color:walletView===id?"#fff":muted,
+    border:`1px solid ${walletView===id?"transparent":gBorder}`,
+    backdropFilter:"blur(20px)",WebkitBackdropFilter:"blur(20px)",
+    boxShadow:walletView===id?`0 3px 12px ${dayAccent.a}44`:"none",
+    transition:"all .2s",
+  });
+
+  const cardS={background:card,backdropFilter:"blur(28px) saturate(180%)",WebkitBackdropFilter:"blur(28px) saturate(180%)",borderRadius:22,padding:"16px",border:`1px solid ${gBorder}`,boxShadow:"0 2px 20px rgba(0,0,0,0.07),inset 0 1px 0 rgba(255,255,255,0.2)"};
+  const secS={fontSize:12,fontWeight:600,color:muted,textTransform:"uppercase",letterSpacing:.8,marginBottom:12};
+  const changeChip=(chg)=>{
+    if(chg===null) return null;
+    const up=chg>=0;
+    return <span style={{fontSize:11,fontWeight:700,padding:"2px 7px",borderRadius:99,background:up?"rgba(239,68,68,0.12)":"rgba(16,217,160,0.12)",color:up?"#ef4444":"#10d9a0"}}>{up?"↑":"↓"}{Math.abs(chg)}%</span>;
+  };
+
+  return (
+    <>
+      {/* Hero card */}
+      <div style={{background:"linear-gradient(135deg,rgba(16,10,60,.95),rgba(40,20,100,.95))",backdropFilter:"blur(28px)",border:"1px solid rgba(99,102,241,.28)",borderRadius:24,padding:"22px",marginBottom:12,boxShadow:"0 12px 48px rgba(99,102,241,.22),inset 0 1px 0 rgba(255,255,255,.08)"}}>
+        <div style={{fontSize:13,color:"rgba(255,255,255,.5)"}}>This month</div>
+        <div style={{display:"flex",alignItems:"flex-end",gap:12,margin:"6px 0 4px"}}>
+          <div style={{fontSize:36,fontWeight:700,color:"#fff",letterSpacing:-1.5}}>₹{tmTotal.toLocaleString()}</div>
+          {changeChip(moChange)}
+        </div>
+        <div style={{fontSize:13,color:"rgba(255,255,255,.4)"}}>{monthExp.length} transactions · avg ₹{avgThisMo}/day</div>
+        <div style={{display:"flex",gap:16,marginTop:16}}>
+          {[
+            {label:"Today",     val:"₹"+todayExp.toLocaleString()},
+            {label:"This week", val:"₹"+twTotal.toLocaleString()},
+            {label:"Last month",val:"₹"+lmTotal.toLocaleString()},
+          ].map(s=>(
+            <div key={s.label}>
+              <div style={{fontSize:11,color:"rgba(255,255,255,.4)"}}>{s.label}</div>
+              <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:1}}>{s.val}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{display:"flex",gap:5,marginBottom:12}}>
+        {[["overview","Overview"],["weekly","Weekly"],["monthly","Monthly"],["analysis","Analysis"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setWalletView(id)} style={tabStyle(id)}>{label}</button>
+        ))}
+      </div>
+
+      <button style={{...cardS,width:"100%",display:"flex",alignItems:"center",justifyContent:"center",gap:8,fontSize:14,fontWeight:600,color:dayAccent.a,marginBottom:12,border:`1.5px dashed ${dayAccent.a}44`}} onClick={openAddExp}>
+        + Add expense
+      </button>
+
+      {/* ── OVERVIEW ─────────────────────────────────────────────────────── */}
+      {walletView==="overview"&&(
+        <>
+          {/* Quick stats row */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+            {[
+              {label:"This week",  val:"₹"+twTotal.toLocaleString(), sub:wkChange!==null?`${wkChange>=0?"↑":"↓"}${Math.abs(wkChange)}% vs last week`:"First week",  color:dayAccent.a},
+              {label:"Last week",  val:"₹"+lwTotal.toLocaleString(), sub:`${lwExps.length} transactions`,  color:muted},
+              {label:"Avg/day",    val:"₹"+avgThisMo.toLocaleString(), sub:"this month",   color:"#10d9a0"},
+              {label:"Top spend",  val:topCat?topCat.icon+" "+topCat.label:"—", sub:topCat?"₹"+topCat.total.toLocaleString()+" this month":"no data", color:"#f43f8e"},
+            ].map(s=>(
+              <div key={s.label} style={cardS}>
+                <div style={{fontSize:11,color:muted,fontWeight:600,textTransform:"uppercase",letterSpacing:.6,marginBottom:5}}>{s.label}</div>
+                <div style={{fontSize:19,fontWeight:700,color:s.color}}>{s.val}</div>
+                <div style={{fontSize:11,color:muted,marginTop:3}}>{s.sub}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* 7-day spending */}
+          {expTrend.some(x=>x.amt>0)&&(
+            <div style={{...cardS,marginBottom:12}}>
+              <div style={secS}>Last 7 days</div>
+              <ResponsiveContainer width="100%" height={130}>
+                <BarChart data={expTrend} margin={{top:4,right:4,left:-24,bottom:0}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={border}/>
+                  <XAxis dataKey="label" tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
+                  <YAxis tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
+                  <Tooltip contentStyle={{background:glass,border:`1px solid ${gBorder}`,borderRadius:12,fontSize:12,color:tc}} formatter={v=>["₹"+v,"Spent"]}/>
+                  <Bar dataKey="amt" radius={[5,5,0,0]}>{expTrend.map((_,i)=><Cell key={i} fill={dayAccent.a}/>)}</Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Split expenses */}
+          {splitExp.length>0&&(
+            <div style={{...cardS,marginBottom:12,border:"1px solid rgba(99,102,241,.18)"}}>
+              <div style={secS}>🤝 Split expenses</div>
+              {splitExp.map((e,i)=>(
+                <div key={e.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<splitExp.length-1?`1px solid ${border}`:"none"}}>
+                  <div style={{width:36,height:36,borderRadius:10,flexShrink:0,background:catColor(e.cat)+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{catIcon(e.cat)}</div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.desc}</div>
+                    <div style={{fontSize:11,color:muted}}>with {e.splitWith}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:14,fontWeight:700,color:"#6366f1"}}>₹{(e.amount/2).toLocaleString()}</div>
+                    <div style={{fontSize:10,color:muted}}>your share</div>
+                  </div>
+                </div>
+              ))}
+              <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${border}`,display:"flex",justifyContent:"space-between"}}>
+                <span style={{fontSize:13,color:muted}}>Total owed/owing</span>
+                <span style={{fontSize:15,fontWeight:700,color:"#6366f1"}}>₹{(splitExp.reduce((s,e)=>s+e.amount,0)/2).toLocaleString()}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Category breakdown */}
+          {expByCat.length>0&&(
+            <div style={{...cardS,marginBottom:12}}>
+              <div style={secS}>This month by category</div>
+              {expByCat.map(c=>(
+                <div key={c.id} style={{marginBottom:12}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5,fontSize:14}}>
+                    <span>{c.icon} {c.label}</span>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      <span style={{fontSize:11,color:muted}}>{pct(c.total,tmTotal)}%</span>
+                      <span style={{fontWeight:600}}>₹{c.total.toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <div style={{height:5,background:track,borderRadius:99,overflow:"hidden"}}>
+                    <div style={{height:"100%",width:`${pct(c.total,tmTotal)}%`,background:`linear-gradient(90deg,${c.color},${c.color}cc)`,borderRadius:99,transition:"width .4s ease",boxShadow:`0 0 6px ${c.color}44`}}/>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Transactions grouped */}
+          {expGroups.length===0&&<div style={{...cardS,textAlign:"center",padding:"28px 0",color:muted}}><div style={{fontSize:34,marginBottom:8}}>💸</div>No expenses yet</div>}
+          {expGroups.map(([date,exps])=>(
+            <div key={date} style={{marginBottom:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:8,paddingLeft:4}}>
+                <span style={{fontSize:11,fontWeight:600,color:muted,textTransform:"uppercase",letterSpacing:.7}}>
+                  {date===makeKey2(new Date())?"Today":date===makeKey2(new Date(Date.now()-86400000))?"Yesterday":fmtKey2(date)}
+                </span>
+                <span style={{fontSize:12,fontWeight:600,color:dayAccent.a}}>₹{exps.reduce((s,e)=>s+e.amount,0).toLocaleString()}</span>
+              </div>
+              <div style={{...cardS,padding:"4px 16px"}}>
+                {exps.map((e,i)=>(
+                  <div key={e.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderBottom:i<exps.length-1?`1px solid ${border}`:"none"}}>
+                    <div style={{width:44,height:44,borderRadius:13,flexShrink:0,background:catColor(e.cat)+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:21}}>{catIcon(e.cat)}</div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:14,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.desc}</div>
+                      <div style={{fontSize:12,color:muted,marginTop:1,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
+                        <span>{catLabel(e.cat)}</span>
+                        {e.split&&<span style={{background:`${dayAccent.a}18`,color:dayAccent.a,borderRadius:6,padding:"0 6px",fontSize:10,fontWeight:600}}>÷ {e.splitWith}</span>}
+                      </div>
+                      {e.note&&<div style={{fontSize:11,color:muted,marginTop:1,fontStyle:"italic"}}>{e.note}</div>}
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0}}>
+                      <div style={{fontSize:15,fontWeight:700,color:"#ef4444"}}>₹{e.amount.toLocaleString()}</div>
+                      {e.split&&<div style={{fontSize:10,color:dayAccent.a}}>₹{(e.amount/2).toLocaleString()} each</div>}
+                      <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:4}}>
+                        <button onClick={()=>openEditExp(e)} style={{fontSize:11,color:dayAccent.a,fontWeight:600,border:`1px solid ${dayAccent.a}38`,borderRadius:6,padding:"2px 8px"}}>Edit</button>
+                        <button onClick={()=>deleteExp(e.id)} style={{fontSize:11,color:muted}}>Remove</button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {/* ── WEEKLY ──────────────────────────────────────────────────────── */}
+      {walletView==="weekly"&&(
+        <>
+          {/* This week vs last week */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+            {[
+              {label:"This week", total:twTotal, exps:twExps, accent:dayAccent.a, change:wkChange, primary:true},
+              {label:"Last week", total:lwTotal, exps:lwExps, accent:muted,       change:null,     primary:false},
+            ].map(w=>(
+              <div key={w.label} style={{...cardS,borderTop:`3px solid ${w.accent}`}}>
+                <div style={{fontSize:11,color:muted,fontWeight:600,textTransform:"uppercase",letterSpacing:.6,marginBottom:6}}>{w.label}</div>
+                <div style={{fontSize:22,fontWeight:700,color:w.primary?w.accent:tc}}>₹{w.total.toLocaleString()}</div>
+                <div style={{fontSize:11,color:muted,marginTop:3}}>{w.exps.length} transactions</div>
+                {w.change!==null&&(
+                  <div style={{marginTop:6,fontSize:11,fontWeight:600,color:w.change>=0?"#ef4444":"#10d9a0"}}>
+                    {w.change>=0?"↑":"↓"}{Math.abs(w.change)}% vs last week
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Daily breakdown this week */}
+          <div style={{...cardS,marginBottom:12}}>
+            <div style={secS}>This week — daily spending</div>
+            <ResponsiveContainer width="100%" height={150}>
+              <BarChart data={twDays} margin={{top:4,right:4,left:-24,bottom:0}}>
+                <CartesianGrid strokeDasharray="3 3" stroke={border}/>
+                <XAxis dataKey="label" tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
+                <YAxis tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
+                <Tooltip contentStyle={{background:glass,border:`1px solid ${gBorder}`,borderRadius:12,fontSize:12,color:tc}} formatter={v=>["₹"+v,"Spent"]}/>
+                <Bar dataKey="amt" radius={[5,5,0,0]}>{twDays.map((d,i)=><Cell key={i} fill={d.isToday?dayAccent.a:dayAccent.a+"88"}/>)}</Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Category comparison this week vs last */}
+          <div style={{...cardS,marginBottom:12}}>
+            <div style={secS}>Category comparison</div>
+            {twCats.length===0&&<div style={{color:muted,fontSize:13,textAlign:"center",padding:"12px 0"}}>No spending this week yet</div>}
+            {EXP_CATS.map(c=>{
+              const tw=twCats.find(x=>x.id===c.id)?.total||0;
+              const lw=lwCats.find(x=>x.id===c.id)?.total||0;
+              if(!tw&&!lw) return null;
+              const maxV=Math.max(tw,lw,1);
+              return (
+                <div key={c.id} style={{marginBottom:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5,fontSize:13}}>
+                    <span>{c.icon} {c.label}</span>
+                    <div style={{display:"flex",gap:10}}>
+                      <span style={{color:dayAccent.a,fontWeight:600}}>₹{tw.toLocaleString()}</span>
+                      <span style={{color:muted}}>₹{lw.toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <div style={{height:4,background:track,borderRadius:99,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${pct(tw,maxV)}%`,background:c.color,borderRadius:99,transition:"width .4s"}}/>
+                    </div>
+                    <div style={{height:4,background:track,borderRadius:99,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${pct(lw,maxV)}%`,background:c.color+"55",borderRadius:99,transition:"width .4s"}}/>
+                    </div>
+                  </div>
+                </div>
+              );
+            }).filter(Boolean)}
+            <div style={{display:"flex",gap:14,marginTop:4}}>
+              <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:muted}}><div style={{width:10,height:4,borderRadius:2,background:dayAccent.a}}/>This week</div>
+              <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:muted}}><div style={{width:10,height:4,borderRadius:2,background:dayAccent.a+"55"}}/>Last week</div>
+            </div>
+          </div>
+
+          {/* This week transactions */}
+          <div style={{...cardS}}>
+            <div style={secS}>This week transactions</div>
+            {twExps.length===0&&<div style={{color:muted,fontSize:13,textAlign:"center",padding:"12px 0"}}>No transactions this week</div>}
+            {twExps.map((e,i)=>(
+              <div key={e.id} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 0",borderBottom:i<twExps.length-1?`1px solid ${border}`:"none"}}>
+                <div style={{width:38,height:38,borderRadius:11,flexShrink:0,background:catColor(e.cat)+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:19}}>{catIcon(e.cat)}</div>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:14,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.desc}</div>
+                  <div style={{fontSize:11,color:muted}}>{catLabel(e.cat)} · {fmtKey2(e.date)}</div>
+                </div>
+                <div style={{fontSize:14,fontWeight:700,color:"#ef4444",flexShrink:0}}>₹{e.amount.toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* ── MONTHLY ─────────────────────────────────────────────────────── */}
+      {walletView==="monthly"&&(
+        <>
+          {/* 3-month comparison */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}}>
+            {[
+              {label:getMonthRange2(0).label, total:tmTotal, accent:dayAccent.a},
+              {label:getMonthRange2(1).label, total:lmTotal, accent:muted},
+              {label:getMonthRange2(2).label, total:m2Total, accent:muted},
+            ].map((m,i)=>(
+              <div key={m.label} style={{...cardS,borderTop:`3px solid ${m.accent}`,padding:"12px"}}>
+                <div style={{fontSize:10,color:muted,fontWeight:600,textTransform:"uppercase",letterSpacing:.5,marginBottom:4}}>{m.label}</div>
+                <div style={{fontSize:16,fontWeight:700,color:i===0?m.accent:tc}}>₹{m.total.toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* 6-month bar chart */}
+          <div style={{...cardS,marginBottom:12}}>
+            <div style={secS}>6-month overview</div>
+            <ResponsiveContainer width="100%" height={160}>
+              <BarChart data={last6Mo} margin={{top:4,right:4,left:-24,bottom:0}}>
+                <CartesianGrid strokeDasharray="3 3" stroke={border}/>
+                <XAxis dataKey="label" tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
+                <YAxis tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
+                <Tooltip contentStyle={{background:glass,border:`1px solid ${gBorder}`,borderRadius:12,fontSize:12,color:tc}} formatter={v=>["₹"+v,"Spent"]}/>
+                <Bar dataKey="total" radius={[5,5,0,0]}>
+                  {last6Mo.map((_,i)=><Cell key={i} fill={i===5?dayAccent.a:dayAccent.a+"66"}/>)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Monthly avg comparison */}
+          <div style={{...cardS,marginBottom:12}}>
+            <div style={secS}>Daily average comparison</div>
+            {[
+              {label:"This month avg/day", val:"₹"+avgThisMo.toLocaleString(), color:dayAccent.a},
+              {label:"Last month avg/day", val:"₹"+avgLastMo.toLocaleString(), color:muted},
+            ].map(r=>(
+              <div key={r.label} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:`1px solid ${border}`}}>
+                <span style={{fontSize:14,color:muted}}>{r.label}</span>
+                <span style={{fontSize:16,fontWeight:700,color:r.color}}>{r.val}</span>
+              </div>
+            ))}
+            <div style={{padding:"10px 0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:14,color:muted}}>Month-over-month</span>
+              <span style={{fontSize:14,fontWeight:700,color:moChange!==null?(moChange>=0?"#ef4444":"#10d9a0"):muted}}>
+                {moChange!==null?(moChange>=0?"↑":"↓")+Math.abs(moChange)+"%":"No data"}
+              </span>
+            </div>
+          </div>
+
+          {/* This vs last month categories */}
+          <div style={{...cardS}}>
+            <div style={secS}>Category: this vs last month</div>
+            {EXP_CATS.map(c=>{
+              const tm2=tmCats.find(x=>x.id===c.id)?.total||0;
+              const lm2=lmCats.find(x=>x.id===c.id)?.total||0;
+              if(!tm2&&!lm2) return null;
+              const maxV=Math.max(tm2,lm2,1);
+              const chg=lm2?Math.round(((tm2-lm2)/lm2)*100):null;
+              return (
+                <div key={c.id} style={{marginBottom:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:5,fontSize:13}}>
+                    <span>{c.icon} {c.label}</span>
+                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                      {chg!==null&&<span style={{fontSize:10,fontWeight:700,color:chg>=0?"#ef4444":"#10d9a0"}}>{chg>=0?"↑":"↓"}{Math.abs(chg)}%</span>}
+                      <span style={{color:dayAccent.a,fontWeight:600}}>₹{tm2.toLocaleString()}</span>
+                      <span style={{color:muted,fontSize:12}}>₹{lm2.toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <div style={{height:4,background:track,borderRadius:99,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${pct(tm2,maxV)}%`,background:c.color,borderRadius:99,transition:"width .4s"}}/>
+                    </div>
+                    <div style={{height:4,background:track,borderRadius:99,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${pct(lm2,maxV)}%`,background:c.color+"55",borderRadius:99,transition:"width .4s"}}/>
+                    </div>
+                  </div>
+                </div>
+              );
+            }).filter(Boolean)}
+            <div style={{display:"flex",gap:14,marginTop:4}}>
+              <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:muted}}><div style={{width:10,height:4,borderRadius:2,background:dayAccent.a}}/>This month</div>
+              <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:muted}}><div style={{width:10,height:4,borderRadius:2,background:dayAccent.a+"55"}}/>Last month</div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── ANALYSIS ────────────────────────────────────────────────────── */}
+      {walletView==="analysis"&&(
+        <>
+          {/* Key insights */}
+          <div style={{...cardS,marginBottom:12}}>
+            <div style={secS}>💡 Smart insights</div>
+            {[
+              topCat&&{
+                icon:topCat.icon,
+                title:`${topCat.label} is your biggest spend`,
+                sub:`₹${topCat.total.toLocaleString()} this month — ${pct(topCat.total,tmTotal)}% of total`,
+                color:topCat.color,
+              },
+              moChange!==null&&{
+                icon: moChange>=0?"📈":"📉",
+                title: moChange>=0?`Spending up ${moChange}% this month`:`Spending down ${Math.abs(moChange)}% this month`,
+                sub: `₹${tmTotal.toLocaleString()} vs ₹${lmTotal.toLocaleString()} last month`,
+                color: moChange>=0?"#ef4444":"#10d9a0",
+              },
+              wkChange!==null&&{
+                icon: wkChange>=0?"⚠️":"✅",
+                title: wkChange>=0?`This week up ${wkChange}% from last`:`Spending down ${Math.abs(wkChange)}% this week`,
+                sub: `₹${twTotal.toLocaleString()} this week vs ₹${lwTotal.toLocaleString()} last week`,
+                color: wkChange>=0?"#f59e0b":"#10d9a0",
+              },
+              avgThisMo>0&&{
+                icon:"📅",
+                title:`Daily average ₹${avgThisMo.toLocaleString()}`,
+                sub: avgThisMo>avgLastMo?`₹${(avgThisMo-avgLastMo).toLocaleString()} more than last month daily avg`:`₹${(avgLastMo-avgThisMo).toLocaleString()} less than last month daily avg`,
+                color:"#6366f1",
+              },
+              splitExp.length>0&&{
+                icon:"🤝",
+                title:`${splitExp.length} split expenses pending`,
+                sub:`₹${(splitExp.reduce((s,e)=>s+e.amount,0)/2).toLocaleString()} total your share`,
+                color:"#a855f7",
+              },
+            ].filter(Boolean).map((ins,i)=>(
+              <div key={i} style={{display:"flex",gap:12,padding:"10px 0",borderBottom:`1px solid ${border}`}}>
+                <div style={{width:36,height:36,borderRadius:10,flexShrink:0,background:ins.color+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{ins.icon}</div>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:600,color:tc}}>{ins.title}</div>
+                  <div style={{fontSize:11,color:muted,marginTop:2}}>{ins.sub}</div>
+                </div>
+              </div>
+            ))}
+            {tmTotal===0&&<div style={{color:muted,fontSize:13,textAlign:"center",padding:"16px 0"}}>Add some expenses to see insights</div>}
+          </div>
+
+          {/* Spending pattern — area chart 6 months */}
+          {last6Mo.some(m=>m.total>0)&&(
+            <div style={{...cardS,marginBottom:12}}>
+              <div style={secS}>Spending trend — 6 months</div>
+              <ResponsiveContainer width="100%" height={160}>
+                <AreaChart data={last6Mo} margin={{top:4,right:4,left:-24,bottom:0}}>
+                  <defs>
+                    <linearGradient id="ag2" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={dayAccent.a} stopOpacity={0.35}/>
+                      <stop offset="100%" stopColor={dayAccent.a} stopOpacity={0}/>
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke={border}/>
+                  <XAxis dataKey="label" tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
+                  <YAxis tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
+                  <Tooltip contentStyle={{background:glass,border:`1px solid ${gBorder}`,borderRadius:12,fontSize:12,color:tc}} formatter={v=>["₹"+v,"Spent"]}/>
+                  <Area type="monotone" dataKey="total" stroke={dayAccent.a} strokeWidth={2.5} fill="url(#ag2)" dot={{fill:dayAccent.a,r:4,strokeWidth:0}}/>
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {/* Category donut simulation using bars */}
+          {tmCats.length>0&&(
+            <div style={{...cardS,marginBottom:12}}>
+              <div style={secS}>Spending breakdown this month</div>
+              {tmCats.map(c=>(
+                <div key={c.id} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+                  <div style={{width:32,height:32,borderRadius:9,background:c.color+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,flexShrink:0}}>{c.icon}</div>
+                  <div style={{flex:1}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:4,fontSize:13}}>
+                      <span style={{fontWeight:500}}>{c.label}</span>
+                      <div style={{display:"flex",gap:8}}>
+                        <span style={{color:muted,fontSize:11}}>{pct(c.total,tmTotal)}%</span>
+                        <span style={{fontWeight:600}}>₹{c.total.toLocaleString()}</span>
+                      </div>
+                    </div>
+                    <div style={{height:5,background:track,borderRadius:99,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${pct(c.total,tmTotal)}%`,background:`linear-gradient(90deg,${c.color},${c.color}bb)`,borderRadius:99,transition:"width .4s",boxShadow:`0 0 6px ${c.color}44`}}/>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Monthly summary table */}
+          <div style={{...cardS}}>
+            <div style={secS}>Monthly summary</div>
+            {[getMonthRange2(0),getMonthRange2(1),getMonthRange2(2)].map((r,i)=>{
+              const total=sumR(r.start,r.end);
+              const cnt=sortedExp.filter(e=>e.date>=r.start&&e.date<=r.end).length;
+              const avg=cnt?Math.round(total/new Date(r.start.split("-")[0],r.start.split("-")[1],0).getDate()):0;
+              return (
+                <div key={r.label} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 0",borderBottom:i<2?`1px solid ${border}`:"none"}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:14,fontWeight:600,color:i===0?dayAccent.a:tc}}>{r.label}{i===0?" (current)":""}</div>
+                    <div style={{fontSize:11,color:muted,marginTop:2}}>{cnt} transactions · ₹{avg}/day avg</div>
+                  </div>
+                  <div style={{fontSize:16,fontWeight:700,color:i===0?dayAccent.a:tc}}>₹{total.toLocaleString()}</div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function fmtKey2(k) {
+  const [y,m,d]=k.split("-"),dt=new Date(+y,+m-1,+d);
+  const DAYS2=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"],MONTHS2=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${DAYS2[dt.getDay()]}, ${dt.getDate()} ${MONTHS2[dt.getMonth()]}`;
+}
+
 /* ─── APP ──────────────────────────────────────────────────────────────────── */
 export default function App() {
 
+  /* single versioned persisted store */
   const [store, setStoreRaw] = useState(() => loadStore(DEFAULTS));
   const setStore = useCallback((upd) => {
     setStoreRaw(prev => {
@@ -357,6 +909,7 @@ export default function App() {
   const [reminder,     setReminder]     = useState({ active:false, hrs:1, label:"" });
   const [noteSearch,   setNoteSearch]   = useState("");
   const [holidayLabel, setHolidayLabel] = useState("");
+  const importRef = useRef(null);
   const remRef = useRef(null);
 
   /* derived */
@@ -418,6 +971,64 @@ export default function App() {
     return Object.entries(g).sort((a,b) => b[0].localeCompare(a[0]));
   }
   const expGroups = groupByDate(sortedExp.slice(0,80));
+
+  /* ── week/month comparison helpers ─────────────────────────────────────── */
+  function getWeekRange(offsetWeeks) {
+    const now = new Date();
+    const dow  = now.getDay();
+    const start = new Date(now); start.setDate(now.getDate() - dow - offsetWeeks*7);
+    const end   = new Date(start); end.setDate(start.getDate() + 6);
+    return { start:makeKey(start), end:makeKey(end) };
+  }
+  function getMonthRange(offsetMonths) {
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth() - offsetMonths;
+    const start = new Date(y, m, 1);
+    const end   = new Date(y, m+1, 0);
+    return { start:makeKey(start), end:makeKey(end), label:`${MONTHS[((m%12)+12)%12]} ${start.getFullYear()}` };
+  }
+  function sumInRange(start, end) {
+    return sortedExp.filter(e=>e.date>=start&&e.date<=end).reduce((s,e)=>s+e.amount,0);
+  }
+  function countInRange(start, end) {
+    return sortedExp.filter(e=>e.date>=start&&e.date<=end).length;
+  }
+  function catInRange(start, end) {
+    return EXP_CATS.map(c=>({
+      ...c,
+      total: sortedExp.filter(e=>e.date>=start&&e.date<=end&&e.cat===c.id).reduce((s,e)=>s+e.amount,0)
+    })).filter(x=>x.total>0).sort((a,b)=>b.total-a.total);
+  }
+
+  const thisWeek  = getWeekRange(0);
+  const lastWeek  = getWeekRange(1);
+  const thisMonth2= getMonthRange(0);
+  const lastMonth = getMonthRange(1);
+  const prev2Month= getMonthRange(2);
+
+  const thisWeekTotal  = sumInRange(thisWeek.start,  thisWeek.end);
+  const lastWeekTotal  = sumInRange(lastWeek.start,  lastWeek.end);
+  const thisMonthTotal2= sumInRange(thisMonth2.start, thisMonth2.end);
+  const lastMonthTotal = sumInRange(lastMonth.start,  lastMonth.end);
+  const prev2MonthTotal= sumInRange(prev2Month.start, prev2Month.end);
+
+  const weekChange  = lastWeekTotal  ? Math.round(((thisWeekTotal  - lastWeekTotal)  / lastWeekTotal)  * 100) : null;
+  const monthChange = lastMonthTotal ? Math.round(((thisMonthTotal2 - lastMonthTotal) / lastMonthTotal) * 100) : null;
+
+  // last 6 months bar data
+  const last6Months = Array.from({length:6},(_,i)=>{
+    const r = getMonthRange(5-i);
+    return { label:r.label.slice(0,3), total:sumInRange(r.start,r.end), count:countInRange(r.start,r.end) };
+  });
+
+  // daily avg this month vs last month
+  const daysInThisMonth = new Date().getDate();
+  const daysInLastMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 0).getDate();
+  const avgThisMonth = daysInThisMonth ? Math.round(thisMonthTotal2 / daysInThisMonth) : 0;
+  const avgLastMonth = daysInLastMonth ? Math.round(lastMonthTotal  / daysInLastMonth) : 0;
+
+  // top category this month
+  const topCatThisMonth = catInRange(thisMonth2.start, thisMonth2.end)[0] || null;
 
   const filteredNotes = notes
     .filter(n => !noteSearch
@@ -541,7 +1152,7 @@ export default function App() {
     .drag-ghost{opacity:.38;transform:scale(.97)}
   `;
 
-  /* ── inner components ─────────────────────────────────────────────────────── */
+  /* ── inner components (need closure access — defined before return) ─────── */
 
   function DayNav() {
     const future = viewKey > tk;
@@ -611,6 +1222,7 @@ export default function App() {
                 userSelect:"none",
               }}
             >
+              {/* drag handle only — onDown fires here, not on whole row */}
               <span
                 onTouchStart={e => { e.stopPropagation(); dragCtrl.onDown(e, i); }}
                 onMouseDown={e  => { e.stopPropagation(); dragCtrl.onDown(e, i); }}
@@ -636,6 +1248,40 @@ export default function App() {
     );
   }
 
+  /* ── backup helpers ──────────────────────────────────────────────────────── */
+  function exportData() {
+    try {
+      const data = JSON.stringify(store, null, 2);
+      const blob = new Blob([data], { type: 'application/json' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `dayflow-backup-${todayKey()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch(e) { alert('Export failed: ' + e.message); }
+  }
+
+  function importData(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (!parsed.tasks && !parsed.expenses && !parsed.notes) {
+          alert('Invalid backup file.'); return;
+        }
+        const merged = { ...DEFAULTS, ...parsed, version: DATA_VERSION };
+        saveStore(merged);
+        setStoreRaw(merged);
+        setSheet(null);
+        alert('Data restored successfully!');
+      } catch { alert('Could not read backup file.'); }
+    };
+    reader.readAsText(file);
+  }
+
   /* ═══════════════════════════════════════════════════════════════════════════ */
   return (
     <>
@@ -657,6 +1303,9 @@ export default function App() {
                 <button onClick={cancelReminder} style={{color:muted,fontSize:16,paddingLeft:2}}>×</button>
               </div>
             )}
+            <button onClick={()=>setSheet("backup")} style={{background:card,backdropFilter:"blur(28px)",border:`1px solid ${gBorder}`,borderRadius:13,width:40,height:40,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 2px 12px rgba(0,0,0,.1),inset 0 1px 0 rgba(255,255,255,.2)"}}>
+              💾
+            </button>
             <button onClick={()=>setDark(d=>!d)} style={{background:card,backdropFilter:"blur(28px)",border:`1px solid ${gBorder}`,borderRadius:13,width:40,height:40,fontSize:18,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 2px 12px rgba(0,0,0,.1),inset 0 1px 0 rgba(255,255,255,.2)"}}>
               {dark?"☀️":"🌙"}
             </button>
@@ -817,118 +1466,33 @@ export default function App() {
 
           {/* ═══ WALLET ═══════════════════════════════════════════════════ */}
           {tab==="expenses"&&(
-            <>
-              <div style={{background:"linear-gradient(135deg,rgba(16,10,60,.95),rgba(40,20,100,.95))",backdropFilter:"blur(28px)",border:"1px solid rgba(99,102,241,.28)",borderRadius:24,padding:"22px",marginBottom:12,boxShadow:"0 12px 48px rgba(99,102,241,.22),inset 0 1px 0 rgba(255,255,255,.08)"}}>
-                <div style={{fontSize:13,color:"rgba(255,255,255,.5)"}}>This month</div>
-                <div style={{fontSize:38,fontWeight:700,color:"#fff",letterSpacing:-1.5,margin:"6px 0 4px"}}>₹{totalMonth.toLocaleString()}</div>
-                <div style={{fontSize:13,color:"rgba(255,255,255,.4)"}}>{monthExp.length} transactions</div>
-                <div style={{display:"flex",gap:22,marginTop:18}}>
-                  {[{label:"Today",val:"₹"+todayExp.toLocaleString()},{label:"Avg/day",val:"₹"+(monthExp.length?Math.round(totalMonth/new Date().getDate()):0).toLocaleString()},{label:"Splitwise",val:splitExp.length+" items"}].map(s=>(
-                    <div key={s.label}>
-                      <div style={{fontSize:11,color:"rgba(255,255,255,.4)"}}>{s.label}</div>
-                      <div style={{fontSize:14,fontWeight:600,color:"#fff",marginTop:2}}>{s.val}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <button className="dash" onClick={openAddExp} style={{marginBottom:12,color:dayAccent.a,borderColor:`${dayAccent.a}38`}}>+ Add expense</button>
-
-              {splitExp.length>0&&(
-                <div className="card" style={{marginBottom:12,border:"1px solid rgba(99,102,241,.18)"}}>
-                  <Sec>🤝 Split expenses</Sec>
-                  {splitExp.map((e,i)=>(
-                    <div key={e.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:i<splitExp.length-1?`1px solid ${border}`:"none"}}>
-                      <div style={{width:36,height:36,borderRadius:10,flexShrink:0,background:catColor(e.cat)+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{catIcon(e.cat)}</div>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontSize:13,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.desc}</div>
-                        <div style={{fontSize:11,color:muted}}>with {e.splitWith}</div>
-                      </div>
-                      <div style={{textAlign:"right",flexShrink:0}}>
-                        <div style={{fontSize:14,fontWeight:700,color:"#6366f1"}}>₹{(e.amount/2).toLocaleString()}</div>
-                        <div style={{fontSize:10,color:muted}}>your share</div>
-                      </div>
-                    </div>
-                  ))}
-                  <div style={{marginTop:10,paddingTop:10,borderTop:`1px solid ${border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <span style={{fontSize:13,color:muted}}>Total owed / owing</span>
-                    <span style={{fontSize:15,fontWeight:700,color:"#6366f1"}}>₹{(splitExp.reduce((s,e)=>s+e.amount,0)/2).toLocaleString()}</span>
-                  </div>
-                </div>
-              )}
-
-              {expTrend.some(x=>x.amt>0)&&(
-                <div className="card" style={{marginBottom:12}}>
-                  <Sec>Spending — 7 days</Sec>
-                  <ResponsiveContainer width="100%" height={135}>
-                    <BarChart data={expTrend} margin={{top:4,right:4,left:-24,bottom:0}}>
-                      <CartesianGrid strokeDasharray="3 3" stroke={border}/>
-                      <XAxis dataKey="label" tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
-                      <YAxis tick={{fontSize:10,fill:muted}} tickLine={false} axisLine={false}/>
-                      <Tooltip contentStyle={{background:glass,border:`1px solid ${gBorder}`,borderRadius:12,fontSize:12,color:tc}} formatter={v=>["₹"+v,"Spent"]}/>
-                      <Bar dataKey="amt" radius={[6,6,0,0]}>
-                        {expTrend.map((_,i)=><Cell key={i} fill={dayAccent.a}/>)}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-
-              {expByCat.length>0&&(
-                <div className="card" style={{marginBottom:12}}>
-                  <Sec>By category</Sec>
-                  {expByCat.map(c=>(
-                    <div key={c.id} style={{marginBottom:12}}>
-                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:5,fontSize:14}}>
-                        <span>{c.icon} {c.label}</span>
-                        <span style={{fontWeight:600}}>₹{c.total.toLocaleString()}</span>
-                      </div>
-                      <div style={{height:5,background:track,borderRadius:99,overflow:"hidden"}}>
-                        <div style={{height:"100%",width:`${Math.round((c.total/totalMonth)*100)}%`,background:`linear-gradient(90deg,${c.color},${c.color}cc)`,borderRadius:99,transition:"width .4s ease",boxShadow:`0 0 6px ${c.color}44`}}/>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {expGroups.length===0&&(
-                <div className="card" style={{textAlign:"center",padding:"28px 0",color:muted}}>
-                  <div style={{fontSize:34,marginBottom:8}}>💸</div>No expenses yet
-                </div>
-              )}
-              {expGroups.map(([date,exps])=>(
-                <div key={date} style={{marginBottom:12}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,paddingLeft:4}}>
-                    <span style={{fontSize:11,fontWeight:600,color:muted,textTransform:"uppercase",letterSpacing:.7}}>{date===tk?"Today":date===offsetKey(tk,-1)?"Yesterday":fmtKey(date)}</span>
-                    <span style={{fontSize:12,fontWeight:600,color:dayAccent.a}}>₹{exps.reduce((s,e)=>s+e.amount,0).toLocaleString()}</span>
-                  </div>
-                  <div className="card" style={{padding:"4px 16px"}}>
-                    {exps.map((e,i)=>(
-                      <div key={e.id} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderBottom:i<exps.length-1?`1px solid ${border}`:"none"}}>
-                        <div style={{width:44,height:44,borderRadius:13,flexShrink:0,background:catColor(e.cat)+"18",display:"flex",alignItems:"center",justifyContent:"center",fontSize:21}}>{catIcon(e.cat)}</div>
-                        <div style={{flex:1,minWidth:0}}>
-                          <div style={{fontSize:14,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.desc}</div>
-                          <div style={{fontSize:12,color:muted,marginTop:1,display:"flex",alignItems:"center",gap:5,flexWrap:"wrap"}}>
-                            <span>{catLabel(e.cat)}</span>
-                            {e.split&&<span style={{background:`${dayAccent.a}18`,color:dayAccent.a,borderRadius:6,padding:"0 6px",fontSize:10,fontWeight:600}}>÷ {e.splitWith}</span>}
-                          </div>
-                          {e.note&&<div style={{fontSize:11,color:muted,marginTop:1,fontStyle:"italic"}}>{e.note}</div>}
-                        </div>
-                        <div style={{textAlign:"right",flexShrink:0}}>
-                          <div style={{fontSize:15,fontWeight:700,color:"#ef4444"}}>₹{e.amount.toLocaleString()}</div>
-                          {e.split&&<div style={{fontSize:10,color:dayAccent.a}}>₹{(e.amount/2).toLocaleString()} each</div>}
-                          <div style={{display:"flex",gap:6,justifyContent:"flex-end",marginTop:4}}>
-                            <button onClick={()=>openEditExp(e)} style={{fontSize:11,color:dayAccent.a,fontWeight:600,border:`1px solid ${dayAccent.a}38`,borderRadius:6,padding:"2px 8px"}}>Edit</button>
-                            <button onClick={()=>deleteExp(e.id)} style={{fontSize:11,color:muted}}>Remove</button>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </>
+            <WalletTab
+              expenses={expenses}
+              sortedExp={sortedExp}
+              monthExp={monthExp}
+              totalMonth={totalMonth}
+              todayExp={todayExp}
+              expByCat={expByCat}
+              splitExp={splitExp}
+              expGroups={expGroups}
+              days7={days7}
+              expTrend={expTrend}
+              openAddExp={openAddExp}
+              openEditExp={openEditExp}
+              deleteExp={deleteExp}
+              dayAccent={dayAccent}
+              card={card}
+              glass={glass}
+              gBorder={gBorder}
+              tc={tc}
+              muted={muted}
+              border={border}
+              inp={inp}
+              track={track}
+              dark={dark}
+            />
           )}
+
 
           {/* ═══ NOTES ════════════════════════════════════════════════════ */}
           {tab==="notes"&&(
@@ -1094,6 +1658,34 @@ export default function App() {
           {editNoteId&&<button onClick={()=>deleteNote(editNoteId)} style={{color:"#ef4444",fontSize:14,fontWeight:600,padding:8,textAlign:"center"}}>Delete note</button>}
         </div>
       </Sheet>
+      <Sheet open={sheet==="backup"} onClose={()=>setSheet(null)} title="💾 Backup & Restore">
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+          <div style={{background:"rgba(99,102,241,0.08)",borderRadius:14,padding:"14px 15px"}}>
+            <div style={{fontSize:14,fontWeight:600,marginBottom:4}}>Export your data</div>
+            <div style={{fontSize:13,color:"var(--muted)",marginBottom:12,lineHeight:1.5}}>Download a backup file of all your tasks, expenses, notes and settings. Use this to restore on a new device or URL.</div>
+            <button className="btn-a" onClick={exportData}>⬇️ Download backup</button>
+          </div>
+
+          <div style={{background:"rgba(16,217,160,0.08)",borderRadius:14,padding:"14px 15px"}}>
+            <div style={{fontSize:14,fontWeight:600,marginBottom:4}}>Restore from backup</div>
+            <div style={{fontSize:13,color:"var(--muted)",marginBottom:12,lineHeight:1.5}}>Select a backup JSON file to restore all your data. This will replace your current data.</div>
+            <input
+              ref={importRef}
+              type="file"
+              accept=".json"
+              onChange={importData}
+              style={{display:"none"}}
+            />
+            <button className="btn-a" style={{background:"linear-gradient(135deg,#10d9a0,#06b6d4)"}} onClick={()=>importRef.current&&importRef.current.click()}>⬆️ Restore from file</button>
+          </div>
+
+          <div style={{fontSize:12,color:"var(--muted)",textAlign:"center",lineHeight:1.6}}>
+            💡 Tip: Export your data regularly. localStorage is device-specific — a backup file works on any device or URL.
+          </div>
+        </div>
+      </Sheet>
+
     </>
   );
 }
